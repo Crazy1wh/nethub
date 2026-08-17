@@ -1,0 +1,13 @@
+services:
+  lan-nav:
+    build: .
+    container_name: lan-nav
+    ports:
+      - "8093:8093"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - SCAN_SUBNET=192.168.1.0/24
+      - SCAN_INTERVAL_HOURS=6
+      - SCAN_FULL_PORTS=1
+    restart: unless-stopped

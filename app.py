@@ -1,0 +1,391 @@
+import asyncio
+import concurrent.futures
+import datetime as dt
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import socket
+import sqlite3
+import ssl
+import threading
+import time
+import urllib.error
+import urllib.request
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
+DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_DIR, "nav.db"))
+ICON_DIR = os.path.join(DATA_DIR, "icons")
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(ICON_DIR, exist_ok=True)
+
+OWN_PORT = int(os.environ.get("OWN_PORT", "8093"))
+SUBNET = os.environ.get("SCAN_SUBNET", "192.168.1.0/24")
+COMMON_PORTS = [int(x) for x in os.environ.get(
+    "SCAN_PORTS",
+    "80,443,3000,3001,4000,5000,66,8000,8010,8090,8092,8322,8080,8088,8081,9000,8888,9090,9443"
+).split(",")]
+FULL_SCAN = os.environ.get("SCAN_FULL_PORTS", "1") == "1"
+SCAN_INTERVAL_H = float(os.environ.get("SCAN_INTERVAL_HOURS", "6"))
+CONNECT_TIMEOUT = float(os.environ.get("CONNECT_TIMEOUT", "0.4"))
+HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "2.5"))
+
+UA = {"User-Agent": "lan-nav/1.0", "Accept": "*/*"}
+TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
+CHARSET_RE = re.compile(rb"charset=[\"']?([\w-]+)", re.I)
+# 内网多为自签证书, 探测时跳过校验
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
+_scan_lock = threading.Lock()
+_scan_running = [False]
+
+app = FastAPI(title="lan-nav")
+
+
+# ---------- DB ----------
+def db():
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def init_db():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS sites(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE,
+            icon TEXT DEFAULT '',
+            group_name TEXT DEFAULT '',
+            source TEXT DEFAULT 'auto',
+            hidden INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'unknown',
+            status_code INTEGER,
+            title TEXT,
+            last_seen TEXT,
+            first_seen TEXT,
+            updated_at TEXT
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS scan_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT, finished_at TEXT,
+            found INTEGER, total TEXT, detail TEXT
+        )""")
+
+
+# ---------- 发现 ----------
+def my_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.settimeout(1)
+        s.connect(("192.168.1.1", 9))  # UDP connect 不出包, 仅用于取本机 IP
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def scan_ports(hosts, ports, timeout=CONNECT_TIMEOUT, workers=300):
+    found = set()
+
+    def check(hp):
+        h, p = hp
+        s = socket.socket()
+        s.settimeout(timeout)
+        try:
+            if s.connect_ex((h, p)) == 0:
+                return (h, p)
+        except Exception:
+            pass
+        finally:
+            s.close()
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(workers) as ex:
+        for r in ex.map(check, [(h, p) for h in hosts for p in ports]):
+            if r:
+                found.add(r)
+    return found
+
+
+def full_port_scan(hosts, timeout=0.15, workers=600):
+    found = set()
+    ports = range(1, 65536)
+
+    def check(hp):
+        h, p = hp
+        s = socket.socket()
+        s.settimeout(timeout)
+        try:
+            if s.connect_ex((h, p)) == 0:
+                return (h, p)
+        except Exception:
+            pass
+        finally:
+            s.close()
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(workers) as ex:
+        for r in ex.map(check, [(h, p) for h in hosts for p in ports]):
+            if r:
+                found.add(r)
+    return found
+
+
+def probe(url):
+    """GET url, 返回 status/title/final_url 或 None"""
+    req = urllib.request.Request(url, headers=UA)
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=SSL_CTX)) if url.startswith("https://") else urllib.request.build_opener()
+    body = b""
+    final = url
+    ctype = ""
+    try:
+        with opener.open(req, timeout=HTTP_TIMEOUT) as r:
+            status = r.status
+            body = r.read(65536)
+            final = r.geturl()
+            ctype = r.headers.get("Content-Type", "") or ""
+    except urllib.error.HTTPError as e:
+        status = e.code
+        try:
+            body = e.read(65536)
+        except Exception:
+            pass
+        final = url
+        ctype = e.headers.get("Content-Type", "") or ""
+    except Exception:
+        return None
+    title = ""
+    m = TITLE_RE.search(body)
+    if m:
+        raw = m.group(1).strip()
+        enc = "utf-8"
+        cm = CHARSET_RE.search(body[:2000])
+        if cm:
+            try:
+                enc = cm.group(1).decode("ascii").lower()
+            except Exception:
+                pass
+        for e in (enc, "utf-8", "gbk"):
+            try:
+                title = raw.decode(e, "replace").strip()[:80]
+                break
+            except Exception:
+                continue
+    return {"status": status, "title": title, "final_url": final, "ctype": ctype}
+
+
+def fetch_favicon(url):
+    base = url.rstrip("/") + "/favicon.ico"
+    try:
+        req = urllib.request.Request(base, headers=UA)
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=SSL_CTX)) if base.startswith("https://") else urllib.request.build_opener()
+        with opener.open(req, timeout=1.5) as r:
+            if r.status == 200:
+                data = r.read()
+                if data and len(data) < 300000:
+                    h = hashlib.md5(data).hexdigest()[:16]
+                    ext = "png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "ico"
+                    fn = f"{h}.{ext}"
+                    with open(os.path.join(ICON_DIR, fn), "wb") as f:
+                        f.write(data)
+                    return f"saved:{fn}"
+    except Exception:
+        pass
+    return ""
+
+
+def host_group(ip, own):
+    if ip == own:
+        return "本机"
+    return ip
+
+
+def run_scan():
+    if _scan_running[0]:
+        return {"skipped": True}
+    _scan_running[0] = True
+    started = dt.datetime.now()
+    detail = []
+    try:
+        own = my_ip()
+        net = ipaddress.ip_network(SUBNET, strict=False)
+        hosts_common = [str(x) for x in net.hosts()][:512]
+        found = scan_ports(hosts_common, COMMON_PORTS)
+        if FULL_SCAN:
+            found |= full_port_scan({own, "127.0.0.1"})
+        results = []
+        found_sorted = sorted(found)
+
+        def probe_one(hp):
+            ip, port = hp
+            if port == OWN_PORT:
+                return None
+            schemes = ("https", "http") if port == 443 else ("http", "https")
+            for scheme in schemes:
+                url = f"{scheme}://{ip}:{port}/"
+                info = probe(url)
+                if info:
+                    sc = info["status"]
+                    status = ("online" if 200 <= sc < 400 or sc in (404, 405) else
+                              ("auth" if sc in (401, 403) else "offline"))
+                    return {
+                        "url": url,
+                        "host": ip,
+                        "port": port,
+                        "name": info["title"] or f"{ip}:{port}",
+                        "title": info["title"],
+                        "icon": fetch_favicon(url),
+                        "status": status,
+                        "status_code": sc,
+                        "group": host_group(ip, own),
+                    }
+            return None
+
+        with concurrent.futures.ThreadPoolExecutor(16) as ex:
+            probed = [r for r in ex.map(probe_one, found_sorted) if r]
+
+        # 同一端口同时发现 127.0.0.1 与本机 IP 时, 保留本机 IP(其他设备可达), 丢弃回环
+        own_ports = {r["port"] for r in probed if r["host"] == own}
+        results = [r for r in probed if not (r["host"] == "127.0.0.1" and r["port"] in own_ports)]
+        for r in results:
+            detail.append(f"{r['url']} -> {r['status_code']} {r['title'] or ''}".strip())
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with db() as c:
+            for r in results:
+                row = c.execute("SELECT id FROM sites WHERE url=?", (r["url"],)).fetchone()
+                if row:
+                    c.execute("UPDATE sites SET status=?, status_code=?, title=?, last_seen=?, updated_at=? WHERE id=?",
+                              (r["status"], r["status_code"], r["title"], now, now, row["id"]))
+                else:
+                    c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,last_seen,first_seen,updated_at)
+                                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                              (r["name"], r["url"], r["icon"], r["group"], "auto",
+                               r["status"], r["status_code"], r["title"], now, now, now))
+        with db() as c:
+            c.execute("INSERT INTO scan_log(started_at, finished_at, found, total, detail) VALUES(?,?,?,?,?)",
+                      (started.isoformat(timespec="seconds"), now, len(results), str(len(detail)), "\n".join(detail)))
+        return {"found": len(results), "detail": detail}
+    finally:
+        _scan_running[0] = False
+
+
+def scanner_loop():
+    while True:
+        try:
+            run_scan()
+        except Exception as e:
+            print("scan error:", e)
+        time.sleep(SCAN_INTERVAL_H * 3600)
+
+
+# ---------- API ----------
+@app.on_event("startup")
+def startup():
+    init_db()
+    t = threading.Thread(target=scanner_loop, daemon=True)
+    t.start()
+
+
+@app.get("/")
+def index():
+    return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+
+
+@app.get("/api/sites")
+def list_sites():
+    with db() as c:
+        rows = c.execute("SELECT * FROM sites ORDER BY group_name, name").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/sites")
+async def add_site(req: Request):
+    body = await req.json()
+    url = (body.get("url") or "").strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "URL 需以 http:// 或 https:// 开头")
+    info = probe(url + "/")
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    name = (body.get("name") or "").strip() or (info or {}).get("title") or url
+    with db() as c:
+        try:
+            cur = c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,last_seen,first_seen,updated_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                            (name, url, (body.get("icon") or ""), (body.get("group") or "").strip() or "手工",
+                             "manual", (info or {}).get("status") and ("online" if 200 <= info["status"] < 400 else "auth" if info["status"] in (401, 403) else "offline") or "unknown",
+                             (info or {}).get("status"), (info or {}).get("title"), now, now, now))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "该 URL 已存在")
+    return {"id": cur.lastrowid}
+
+
+@app.put("/api/sites/{sid}")
+async def update_site(sid: int, req: Request):
+    body = await req.json()
+    fields = []
+    vals = []
+    for k in ("name", "group_name", "icon"):
+        if k in body and body[k] is not None:
+            fields.append(f"{k}=?")
+            vals.append(str(body[k]).strip())
+    if "hidden" in body and body["hidden"] is not None:
+        fields.append("hidden=?")
+        vals.append(1 if body["hidden"] else 0)
+    if not fields:
+        raise HTTPException(400, "无可更新字段")
+    fields.append("updated_at=?")
+    vals.append(dt.datetime.now().isoformat(timespec="seconds"))
+    vals.append(sid)
+    with db() as c:
+        c.execute(f"UPDATE sites SET {', '.join(fields)} WHERE id=?", vals)
+    return {"ok": True}
+
+
+@app.delete("/api/sites/{sid}")
+def delete_site(sid: int):
+    with db() as c:
+        c.execute("DELETE FROM sites WHERE id=?", (sid,))
+    return {"ok": True}
+
+
+@app.post("/api/scan")
+def trigger_scan():
+    if _scan_running[0]:
+        return {"running": True}
+    threading.Thread(target=run_scan, daemon=True).start()
+    return {"running": True}
+
+
+@app.get("/api/scan/status")
+def scan_status():
+    with db() as c:
+        row = c.execute("SELECT * FROM scan_log ORDER BY id DESC LIMIT 1").fetchone()
+    return {"running": _scan_running[0], "last": dict(row) if row else None}
+
+
+ICON_RE = re.compile(r"^[0-9a-f]{16}\.(ico|png)$")
+
+
+@app.get("/icons/{fn}")
+def icon(fn: str):
+    if not ICON_RE.match(fn):
+        raise HTTPException(400, "bad icon name")
+    p = os.path.join(ICON_DIR, fn)
+    if not os.path.exists(p):
+        raise HTTPException(404, "not found")
+    return FileResponse(p)
+
+
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
