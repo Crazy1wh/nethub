@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urljoin
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -39,6 +40,7 @@ HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "2.5"))
 UA = {"User-Agent": "nethub/1.0", "Accept": "*/*"}
 TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
 CHARSET_RE = re.compile(rb"charset=[\"']?([\w-]+)", re.I)
+LINK_ICON_RE = re.compile(rb"<link[^>]*rel=[\"']?(?:shortcut\s+)?icon[\"']?[^>]*href=[\"']([^\"']+)[\"']", re.I)
 # 内网多为自签证书, 探测时跳过校验
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
@@ -196,27 +198,47 @@ def probe(url):
                 break
             except Exception:
                 continue
-    return {"status": status, "title": title, "final_url": final, "ctype": ctype}
+    return {"status": status, "title": title, "final_url": final, "ctype": ctype, "body": body}
 
 
-def fetch_favicon(url):
-    base = url.rstrip("/") + "/favicon.ico"
-    try:
-        req = urllib.request.Request(base, headers=UA)
-        opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=SSL_CTX)) if base.startswith("https://") else urllib.request.build_opener()
-        with opener.open(req, timeout=1.5) as r:
-            if r.status == 200:
-                data = r.read()
-                if data and len(data) < 300000:
-                    h = hashlib.md5(data).hexdigest()[:16]
-                    ext = "png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "ico"
-                    fn = f"{h}.{ext}"
-                    with open(os.path.join(ICON_DIR, fn), "wb") as f:
-                        f.write(data)
-                    return f"saved:{fn}"
-    except Exception:
-        pass
+def guess_ext(data, ctype):
+    ct = (ctype or "").lower()
+    if data[:8] == b"\x89PNG\r\n\x1a\n" or "png" in ct:
+        return "png"
+    head = data.lstrip()[:5].lower()
+    if "svg" in ct or head.startswith(b"<svg") or head.startswith(b"<?xm"):
+        return "svg"
+    if data[:3] == b"\xff\xd8\xff" or "jpeg" in ct or "jpg" in ct:
+        return "jpg"
+    return "ico"
+
+
+def fetch_favicon(url, body=b""):
+    """按 HTML <link rel=icon> 声明优先, 其次 /favicon.ico; 返回 saved:文件名 或空"""
+    candidates = []
+    m = LINK_ICON_RE.search(body)
+    if m:
+        try:
+            candidates.append(urljoin(url, m.group(1).decode("utf-8", "replace").strip()))
+        except Exception:
+            pass
+    candidates.append(url.rstrip("/") + "/favicon.ico")
+    for cu in candidates:
+        try:
+            req = urllib.request.Request(cu, headers=UA)
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=SSL_CTX)) if cu.startswith("https://") else urllib.request.build_opener()
+            with opener.open(req, timeout=2) as r:
+                if r.status == 200:
+                    data = r.read()
+                    if data and len(data) < 300000:
+                        ext = guess_ext(data, r.headers.get("Content-Type", ""))
+                        fn = f"{hashlib.md5(data).hexdigest()[:16]}.{ext}"
+                        with open(os.path.join(ICON_DIR, fn), "wb") as f:
+                            f.write(data)
+                        return f"saved:{fn}"
+        except Exception:
+            continue
     return ""
 
 
@@ -265,7 +287,7 @@ def run_scan():
                         "port": port,
                         "name": t or f"{ip}:{port}",
                         "title": t,
-                        "icon": fetch_favicon(url),
+                        "icon": fetch_favicon(url, info.get("body") or b""),
                         "status": status,
                         "status_code": sc,
                         "group": "",
@@ -283,11 +305,16 @@ def run_scan():
         now = dt.datetime.now().isoformat(timespec="seconds")
         with db() as c:
             for r in results:
-                row = c.execute("SELECT id, host_ip FROM sites WHERE url=?", (r["url"],)).fetchone()
+                row = c.execute("SELECT id, host_ip, icon FROM sites WHERE url=?", (r["url"],)).fetchone()
                 if row:
                     host_ip = row["host_ip"] or r["host"]
-                    c.execute("UPDATE sites SET status=?, status_code=?, title=?, host_ip=?, last_seen=?, updated_at=? WHERE id=?",
-                              (r["status"], r["status_code"], r["title"], host_ip, now, now, row["id"]))
+                    # 已存在站点: 刷新状态/标题; icon 为空才补抓, 不覆盖用户已有图标
+                    if not row["icon"] and r["icon"]:
+                        c.execute("UPDATE sites SET status=?, status_code=?, title=?, host_ip=?, icon=?, last_seen=?, updated_at=? WHERE id=?",
+                                  (r["status"], r["status_code"], r["title"], host_ip, r["icon"], now, now, row["id"]))
+                    else:
+                        c.execute("UPDATE sites SET status=?, status_code=?, title=?, host_ip=?, last_seen=?, updated_at=? WHERE id=?",
+                                  (r["status"], r["status_code"], r["title"], host_ip, now, now, row["id"]))
                 else:
                     c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,host_ip,last_seen,first_seen,updated_at)
                                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -410,7 +437,7 @@ def scan_status():
     return {"running": _scan_running[0], "last": dict(row) if row else None}
 
 
-ICON_RE = re.compile(r"^[0-9a-f]{16}\.(ico|png)$")
+ICON_RE = re.compile(r"^[0-9a-f]{16}\.(ico|png|svg|jpg)$")
 
 
 @app.get("/icons/{fn}")

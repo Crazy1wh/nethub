@@ -120,9 +120,12 @@ function colorOf(name){
 
 function iconHTML(s){
   const ic=s.icon||'';
-  if(ic.startsWith('saved:'))return `<img src="/icons/${ic.slice(6)}" onerror="this.remove()">`;
-  if(ic.startsWith('http'))return `<img src="${esc(ic)}" onerror="this.remove()">`;
-  return esc((s.name||'?')[0]).toUpperCase();
+  const letter=esc((s.name||'?')[0]).toUpperCase();
+  if(ic.startsWith('saved:')||ic.startsWith('http')){
+    const src=ic.startsWith('saved:')?'/icons/'+ic.slice(6):esc(ic);
+    return `<img src="${src}" onerror="this.outerHTML='<span>${letter}</span>'">`;
+  }
+  return letter;
 }
 
 function dotClass(s){
