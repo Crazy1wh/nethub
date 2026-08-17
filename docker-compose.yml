@@ -2,8 +2,7 @@ services:
   lan-nav:
     build: .
     container_name: lan-nav
-    ports:
-      - "8093:8093"
+    network_mode: host
     volumes:
       - ./data:/app/data
     environment:

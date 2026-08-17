@@ -70,6 +70,7 @@ def init_db():
             status TEXT DEFAULT 'unknown',
             status_code INTEGER,
             title TEXT,
+            host_ip TEXT DEFAULT '',
             last_seen TEXT,
             first_seen TEXT,
             updated_at TEXT
@@ -79,6 +80,19 @@ def init_db():
             started_at TEXT, finished_at TEXT,
             found INTEGER, total TEXT, detail TEXT
         )""")
+
+
+def migrate_db():
+    """旧库升级: host_ip 列 + 自动分组迁到 host_ip + 清空旧 auto 站点(混有非网页端口, 由新扫描只收网页重建)"""
+    with db() as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(sites)")]
+        if "host_ip" not in cols:
+            c.execute("ALTER TABLE sites ADD COLUMN host_ip TEXT DEFAULT ''")
+            c.execute("UPDATE sites SET host_ip=group_name WHERE source='auto' AND group_name!=''")
+            c.execute("UPDATE sites SET group_name='' WHERE source='auto'")
+            # 旧行未存 content-type, 无法事后判定是否网页(200 无 title 可能是 json API 也可能是网页),
+            # 一次性清空, 由启动后的新扫描按网页规则重建
+            c.execute("DELETE FROM sites WHERE source='auto'")
 
 
 # ---------- 发现 ----------
@@ -206,12 +220,6 @@ def fetch_favicon(url):
     return ""
 
 
-def host_group(ip, own):
-    if ip == own:
-        return "本机"
-    return ip
-
-
 def run_scan():
     if _scan_running[0]:
         return {"skipped": True}
@@ -238,18 +246,29 @@ def run_scan():
                 info = probe(url)
                 if info:
                     sc = info["status"]
-                    status = ("online" if 200 <= sc < 400 or sc in (404, 405) else
-                              ("auth" if sc in (401, 403) else "offline"))
+                    ct = (info["ctype"] or "").lower()
+                    t = info["title"]
+                    # 只收录真网页: 2xx/3xx 需 html 或带 <title>; 401/403 需 html 且带 title;
+                    # 404/5xx、json API、无 title 纯文本(设备/API 端口)一律过滤
+                    if 200 <= sc < 400:
+                        web = ("html" in ct) or bool(t)
+                    elif sc in (401, 403):
+                        web = ("html" in ct) and bool(t)
+                    else:
+                        web = False
+                    if not web:
+                        return None
+                    status = "online" if sc < 400 else "auth"
                     return {
                         "url": url,
                         "host": ip,
                         "port": port,
-                        "name": info["title"] or f"{ip}:{port}",
-                        "title": info["title"],
+                        "name": t or f"{ip}:{port}",
+                        "title": t,
                         "icon": fetch_favicon(url),
                         "status": status,
                         "status_code": sc,
-                        "group": host_group(ip, own),
+                        "group": "",
                     }
             return None
 
@@ -264,15 +283,16 @@ def run_scan():
         now = dt.datetime.now().isoformat(timespec="seconds")
         with db() as c:
             for r in results:
-                row = c.execute("SELECT id FROM sites WHERE url=?", (r["url"],)).fetchone()
+                row = c.execute("SELECT id, host_ip FROM sites WHERE url=?", (r["url"],)).fetchone()
                 if row:
-                    c.execute("UPDATE sites SET status=?, status_code=?, title=?, last_seen=?, updated_at=? WHERE id=?",
-                              (r["status"], r["status_code"], r["title"], now, now, row["id"]))
+                    host_ip = row["host_ip"] or r["host"]
+                    c.execute("UPDATE sites SET status=?, status_code=?, title=?, host_ip=?, last_seen=?, updated_at=? WHERE id=?",
+                              (r["status"], r["status_code"], r["title"], host_ip, now, now, row["id"]))
                 else:
-                    c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,last_seen,first_seen,updated_at)
-                                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,host_ip,last_seen,first_seen,updated_at)
+                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                               (r["name"], r["url"], r["icon"], r["group"], "auto",
-                               r["status"], r["status_code"], r["title"], now, now, now))
+                               r["status"], r["status_code"], r["title"], r["host"], now, now, now))
         with db() as c:
             c.execute("INSERT INTO scan_log(started_at, finished_at, found, total, detail) VALUES(?,?,?,?,?)",
                       (started.isoformat(timespec="seconds"), now, len(results), str(len(detail)), "\n".join(detail)))
@@ -294,6 +314,7 @@ def scanner_loop():
 @app.on_event("startup")
 def startup():
     init_db()
+    migrate_db()
     t = threading.Thread(target=scanner_loop, daemon=True)
     t.start()
 
@@ -307,7 +328,7 @@ def index():
 def list_sites():
     with db() as c:
         rows = c.execute("SELECT * FROM sites ORDER BY group_name, name").fetchall()
-    return [dict(r) for r in rows]
+    return {"own_ip": my_ip(), "sites": [dict(r) for r in rows]}
 
 
 @app.post("/api/sites")
@@ -319,13 +340,22 @@ async def add_site(req: Request):
     info = probe(url + "/")
     now = dt.datetime.now().isoformat(timespec="seconds")
     name = (body.get("name") or "").strip() or (info or {}).get("title") or url
+    # 从 URL 解析 host_ip(仅 IPv4)
+    host_ip = ""
+    try:
+        from urllib.parse import urlparse
+        h = urlparse(url).hostname or ""
+        socket.inet_aton(h)
+        host_ip = h
+    except Exception:
+        pass
     with db() as c:
         try:
-            cur = c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,last_seen,first_seen,updated_at)
-                               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            cur = c.execute("""INSERT INTO sites(name,url,icon,group_name,source,status,status_code,title,host_ip,last_seen,first_seen,updated_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (name, url, (body.get("icon") or ""), (body.get("group") or "").strip() or "手工",
                              "manual", (info or {}).get("status") and ("online" if 200 <= info["status"] < 400 else "auth" if info["status"] in (401, 403) else "offline") or "unknown",
-                             (info or {}).get("status"), (info or {}).get("title"), now, now, now))
+                             (info or {}).get("status"), (info or {}).get("title"), host_ip, now, now, now))
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该 URL 已存在")
     return {"id": cur.lastrowid}
