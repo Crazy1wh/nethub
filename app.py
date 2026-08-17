@@ -348,7 +348,9 @@ def startup():
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+    # no-cache: 每次打开都重新取最新页面, 避免浏览器缓存旧版 HTML
+    return FileResponse(os.path.join(BASE_DIR, "static", "index.html"),
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/favicon.ico")
