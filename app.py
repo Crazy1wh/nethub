@@ -25,7 +25,7 @@ ICON_DIR = os.path.join(DATA_DIR, "icons")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(ICON_DIR, exist_ok=True)
 
-OWN_PORT = int(os.environ.get("OWN_PORT", "8093"))
+OWN_PORT = int(os.environ.get("OWN_PORT", "80"))
 SUBNET = os.environ.get("SCAN_SUBNET", "192.168.1.0/24")
 COMMON_PORTS = [int(x) for x in os.environ.get(
     "SCAN_PORTS",
@@ -322,6 +322,11 @@ def startup():
 @app.get("/")
 def index():
     return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return FileResponse(os.path.join(BASE_DIR, "static", "favicon.svg"), media_type="image/svg+xml")
 
 
 @app.get("/api/sites")
