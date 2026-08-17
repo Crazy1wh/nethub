@@ -92,7 +92,7 @@ input[type=text]:focus{border-color:var(--accent)}
     <div class="row">
       <input type="text" id="addName" placeholder="名称(留空自动抓标题)">
       <input type="text" id="addUrl" placeholder="http://192.168.1.x:端口/">
-      <input type="text" id="addGroup" placeholder="分组(默认: 手工)">
+      <input type="text" id="addGroup" placeholder="分组(常用/自定义, 留空=手工)">
       <button class="btn primary" id="addOk">保存</button>
       <button class="btn" id="addCancel">取消</button>
     </div>
@@ -148,17 +148,18 @@ function cardHTML(s){
     <span class="acts">
       <button class="ed" title="编辑">✎</button>
       <button class="tg" title="${s.hidden?'恢复显示':'隐藏'}">${s.hidden?'👁':'🙈'}</button>
-      <button class="del" title="删除">✕</button>
+      <button class="del" title="${s.hidden?'彻底删除':'删除(可恢复)'}">✕</button>
     </span>
     <span class="edform">
       <input type="text" class="f-name" value="${esc(s.name)}" placeholder="名称">
-      <input type="text" class="f-group" value="${esc(s.group_name||'')}" placeholder="分组">
+      <input type="text" class="f-group" value="${esc(s.group_name||'')}" placeholder="分组(常用/自定义)">
       <span class="r"><button class="ok btn primary">保存</button><button class="no btn">取消</button></span>
     </span>
   </a>`;
 }
 
 function groupOf(s){
+  if(s.hidden) return '已隐藏';
   if(groupMode==='ip'){
     if(!s.host_ip||s.host_ip==='127.0.0.1')return '本机';
     return s.host_ip===ownIp?'本机':s.host_ip;
@@ -176,13 +177,11 @@ function render(){
   const groups={};
   for(const s of list){(groups[groupOf(s)]=groups[groupOf(s)]||[]).push(s)}
   let keys=Object.keys(groups);
-  if(groupMode==='ip'){
-    keys.sort((a,b)=>(a==='本机'?-1:b==='本机'?1:a.localeCompare(b)));
-  }else{
-    keys.sort((a,b)=>(a==='未分组'?1:b==='未分组'?-1:a.localeCompare(b)));
-  }
+  const rank=g=>g==='已隐藏'?99:(groupMode!=='ip'&&g==='常用'?-1:0);
+  keys.sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
   const online=list.filter(s=>s.status==='online').length;
-  $('#statusbar').innerHTML=`共 <b>${list.length}</b> 个站点 · 在线 <b>${online}</b> 个`+
+  const hidden=sites.filter(s=>s.hidden).length;
+  $('#statusbar').innerHTML=`共 <b>${list.length}</b> 个站点 · 在线 <b>${online}</b> 个 · 已隐藏 <b>${hidden}</b> 个`+
     (lastScan?` · 上次扫描: ${lastScan.finished_at||''} (发现 ${lastScan.found||0} 个)`:'');
   if(!keys.length){$('#content').innerHTML='<div class="empty">暂无站点,点击「重新扫描」自动发现局域网服务</div>';return}
   $('#content').innerHTML=keys.map(g=>`<div class="group"><h2>${esc(g)} <span class="cnt">${groups[g].length}</span></h2>
@@ -232,8 +231,13 @@ $('#content').addEventListener('click',async ev=>{
   ev.preventDefault();ev.stopPropagation();
   const card=ev.target.closest('.card');const id=card.dataset.id;
   if(btn.classList.contains('del')){
-    if(!confirm('删除该站点?'))return;
-    try{await api('/api/sites/'+id,{method:'DELETE'});await load()}catch(e){alert(e.message)}
+    const s=sites.find(x=>x.id==id);
+    if(!s.hidden){  // 未隐藏 -> 软删除(移入已隐藏,可恢复)
+      try{await api('/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hidden:1})});await load()}catch(e){alert(e.message)}
+    }else{          // 已隐藏 -> 彻底删除
+      if(!confirm(`彻底删除「${s.name}」?此操作不可恢复`))return;
+      try{await api('/api/sites/'+id,{method:'DELETE'});await load()}catch(e){alert(e.message)}
+    }
   }else if(btn.classList.contains('tg')){
     const s=sites.find(x=>x.id==id);
     try{await api('/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hidden:s.hidden?0:1})});await load()}catch(e){alert(e.message)}
