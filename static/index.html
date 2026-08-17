@@ -149,6 +149,7 @@ function cardHTML(s){
     <span class="dot ${dotClass(s)}" title="${st} · ${s.status_code||''}"></span>
     <span class="badge">已隐藏</span>
     <span class="acts">
+      <button class="fav" title="${s.favorite?'取消收藏':'收藏到常用'}">${s.favorite?'★':'☆'}</button>
       <button class="ed" title="编辑">✎</button>
       <button class="tg" title="${s.hidden?'恢复显示':'隐藏'}">${s.hidden?'👁':'🙈'}</button>
       <button class="del" title="${s.hidden?'彻底删除':'删除(可恢复)'}">✕</button>
@@ -161,26 +162,27 @@ function cardHTML(s){
   </a>`;
 }
 
-function groupOf(s){
-  if(s.hidden) return '已隐藏';
+function groupKeysOf(s){
+  if(s.hidden) return ['已隐藏'];
   if(groupMode==='ip'){
-    if(!s.host_ip||s.host_ip==='127.0.0.1')return '本机';
-    return s.host_ip===ownIp?'本机':s.host_ip;
+    if(!s.host_ip||s.host_ip==='127.0.0.1')return ['本机'];
+    return [s.host_ip===ownIp?'本机':s.host_ip];
   }
-  return s.group_name||'未分组';
+  const keys=[s.group_name||'未分组'];
+  if(s.favorite) keys.unshift('常用');  // 收藏站点叠加显示在「常用」, 不离开原分组
+  return keys;
 }
 
 function render(){
   const q=($('#search').value||'').trim().toLowerCase();
-  let list=sites.filter(s=>{
-    if(s.hidden&&!q)return false;
+  const list=sites.filter(s=>{
     if(!q)return true;
     return (s.name+' '+s.url+' '+(s.group_name||'')+' '+(s.host_ip||'')).toLowerCase().includes(q);
   });
   const groups={};
-  for(const s of list){(groups[groupOf(s)]=groups[groupOf(s)]||[]).push(s)}
+  for(const s of list){for(const g of groupKeysOf(s)){(groups[g]=groups[g]||[]).push(s)}}
   let keys=Object.keys(groups);
-  const rank=g=>g==='已隐藏'?99:(groupMode!=='ip'&&g==='常用'?-1:0);
+  const rank=g=>g==='已隐藏'?99:(g==='常用'?-1:0);
   keys.sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
   const online=list.filter(s=>s.status==='online').length;
   const hidden=sites.filter(s=>s.hidden).length;
@@ -244,6 +246,9 @@ $('#content').addEventListener('click',async ev=>{
   }else if(btn.classList.contains('tg')){
     const s=sites.find(x=>x.id==id);
     try{await api('/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hidden:s.hidden?0:1})});await load()}catch(e){alert(e.message)}
+  }else if(btn.classList.contains('fav')){
+    const s=sites.find(x=>x.id==id);
+    try{await api('/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:s.favorite?0:1})});await load()}catch(e){alert(e.message)}
   }else if(btn.classList.contains('ed')){
     document.querySelectorAll('.card.editing').forEach(c=>c.classList.remove('editing'));
     card.classList.add('editing');

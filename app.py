@@ -95,6 +95,8 @@ def migrate_db():
             # 旧行未存 content-type, 无法事后判定是否网页(200 无 title 可能是 json API 也可能是网页),
             # 一次性清空, 由启动后的新扫描按网页规则重建
             c.execute("DELETE FROM sites WHERE source='auto'")
+        if "favorite" not in cols:
+            c.execute("ALTER TABLE sites ADD COLUMN favorite INTEGER DEFAULT 0")
 
 
 # ---------- 发现 ----------
@@ -407,6 +409,9 @@ async def update_site(sid: int, req: Request):
     if "hidden" in body and body["hidden"] is not None:
         fields.append("hidden=?")
         vals.append(1 if body["hidden"] else 0)
+    if "favorite" in body and body["favorite"] is not None:
+        fields.append("favorite=?")
+        vals.append(1 if body["favorite"] else 0)
     if not fields:
         raise HTTPException(400, "无可更新字段")
     fields.append("updated_at=?")
