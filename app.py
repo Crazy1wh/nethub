@@ -36,7 +36,7 @@ SCAN_INTERVAL_H = float(os.environ.get("SCAN_INTERVAL_HOURS", "6"))
 CONNECT_TIMEOUT = float(os.environ.get("CONNECT_TIMEOUT", "0.4"))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "2.5"))
 
-UA = {"User-Agent": "lan-nav/1.0", "Accept": "*/*"}
+UA = {"User-Agent": "nethub/1.0", "Accept": "*/*"}
 TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
 CHARSET_RE = re.compile(rb"charset=[\"']?([\w-]+)", re.I)
 # 内网多为自签证书, 探测时跳过校验
@@ -46,7 +46,7 @@ SSL_CTX.verify_mode = ssl.CERT_NONE
 _scan_lock = threading.Lock()
 _scan_running = [False]
 
-app = FastAPI(title="lan-nav")
+app = FastAPI(title="nethub")
 
 
 # ---------- DB ----------
