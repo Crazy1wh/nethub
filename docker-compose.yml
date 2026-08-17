@@ -1,7 +1,7 @@
 services:
-  lan-nav:
+  nethub:
     build: .
-    container_name: lan-nav
+    container_name: nethub
     network_mode: host
     volumes:
       - ./data:/app/data

@@ -1,4 +1,4 @@
-# 内网导航 (lan-nav)
+# nethub — 内网导航 / 网络门户中心
 
 自动发现局域网内所有 Web 服务的导航面板。部署后无需任何配置，自动扫描网段、抓取站点标题和图标，生成深色卡片式导航页，作为内网服务的统一入口。
 
@@ -24,8 +24,8 @@
 ### Docker Compose（推荐）
 
 ```bash
-git clone https://github.com/Crazy1wh/lan-nav.git
-cd lan-nav
+git clone https://github.com/Crazy1wh/nethub.git
+cd nethub
 docker compose up -d --build
 ```
 
