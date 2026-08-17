@@ -37,9 +37,12 @@ input[type=text]:focus{border-color:var(--accent)}
 #statusbar{color:var(--dim);font-size:12px;margin:0 0 16px}
 #statusbar b{color:var(--ok)}
 .group{margin-bottom:28px}
-.group h2{font-size:15px;color:var(--dim);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.group h2{font-size:15px;color:var(--dim);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
 .group h2::before{content:'';width:4px;height:14px;background:var(--accent);border-radius:2px;display:inline-block}
 .group h2 .cnt{color:var(--gray);font-weight:400}
+.group h2 .arrow{color:var(--gray);font-size:11px;margin-left:2px}
+.group.collapsed .grid{display:none}
+.group.collapsed h2{margin-bottom:0}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
 .card{position:relative;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;gap:12px;align-items:center;cursor:pointer;transition:.15s;text-decoration:none;color:var(--text)}
 .card:hover{border-color:var(--accent);transform:translateY(-2px);background:var(--card2)}
@@ -164,13 +167,12 @@ function cardHTML(s){
 
 function groupKeysOf(s){
   if(s.hidden) return ['已隐藏'];
+  if(s.favorite) return ['常用'];  // 收藏后只显示在「常用」, 不再出现在原分组
   if(groupMode==='ip'){
     if(!s.host_ip||s.host_ip==='127.0.0.1')return ['本机'];
     return [s.host_ip===ownIp?'本机':s.host_ip];
   }
-  const keys=[s.group_name||'未分组'];
-  if(s.favorite) keys.unshift('常用');  // 收藏站点叠加显示在「常用」, 不离开原分组
-  return keys;
+  return [s.group_name||'未分组'];
 }
 
 function render(){
@@ -189,8 +191,11 @@ function render(){
   $('#statusbar').innerHTML=`共 <b>${list.length}</b> 个站点 · 在线 <b>${online}</b> 个 · 已隐藏 <b>${hidden}</b> 个`+
     (lastScan?` · 上次扫描: ${lastScan.finished_at||''} (发现 ${lastScan.found||0} 个)`:'');
   if(!keys.length){$('#content').innerHTML='<div class="empty">暂无站点,点击「重新扫描」自动发现局域网服务</div>';return}
-  $('#content').innerHTML=keys.map(g=>`<div class="group"><h2>${esc(g)} <span class="cnt">${groups[g].length}</span></h2>
-    <div class="grid">${groups[g].map(cardHTML).join('')}</div></div>`).join('');
+  $('#content').innerHTML=keys.map(g=>{
+    const collapsed=g==='已隐藏'&&!q;  // 已隐藏分组默认折叠(搜索时自动展开)
+    return `<div class="group${collapsed?' collapsed':''}"><h2>${esc(g)} <span class="cnt">${groups[g].length}</span> <span class="arrow">${collapsed?'▸':'▾'}</span></h2>
+    <div class="grid">${groups[g].map(cardHTML).join('')}</div></div>`;
+  }).join('');
 }
 
 async function load(){
@@ -232,6 +237,13 @@ $('#addOk').onclick=async()=>{
 };
 
 $('#content').addEventListener('click',async ev=>{
+  const h=ev.target.closest('.group h2');  // 点击分组标题折叠/展开
+  if(h){
+    const g=h.parentElement;
+    const collapsed=g.classList.toggle('collapsed');
+    h.querySelector('.arrow').textContent=collapsed?'▸':'▾';
+    return;
+  }
   const btn=ev.target.closest('button');if(!btn)return;
   ev.preventDefault();ev.stopPropagation();
   const card=ev.target.closest('.card');const id=card.dataset.id;
