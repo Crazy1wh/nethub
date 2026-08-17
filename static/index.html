@@ -77,7 +77,36 @@ input[type=text]:focus{border-color:var(--accent)}
 .edform .r{display:flex;gap:6px}
 .edform .r input{flex:1;min-width:0;padding:5px 8px;font-size:12px}
 .edform .r button{padding:5px 10px;font-size:12px}
-@media(max-width:600px){header{flex-direction:column;align-items:stretch}#search{max-width:none}}
+@media(max-width:600px){
+  .wrap{padding:12px 12px 40px}
+  header{gap:8px;margin-bottom:4px}
+  h1{font-size:18px;margin-right:auto}
+  #search{order:3;flex-basis:100%;min-width:0;width:100%;font-size:16px;padding:9px 12px} /* 16px 防 iOS 聚焦缩放 */
+  .seg{order:2}
+  #btnScan{order:4}
+  #btnAdd{order:5}
+  .seg-btn{padding:8px 11px;font-size:12px}
+  .btn{padding:8px 11px;font-size:12px}
+  .sub{font-size:11px;margin-bottom:12px}
+  #statusbar{font-size:11px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .card{padding:10px;gap:8px;border-radius:10px;flex-wrap:wrap}
+  .ic{width:32px;height:32px;border-radius:8px;font-size:15px}
+  .info .nm{font-size:13px}
+  .info .ur{font-size:10px}
+  .dot{top:8px;right:8px;width:7px;height:7px}
+  /* 手机无 hover: 操作按钮常显, 独立一行 */
+  .acts{position:static;display:flex;width:100%;justify-content:flex-end;gap:4px;border-top:1px solid var(--border);padding-top:6px;margin-top:2px}
+  .acts button{font-size:12px;padding:3px 9px}
+  .group{margin-bottom:20px}
+  .group h2{font-size:14px}
+  .panel{padding:12px}
+  .panel .row{flex-direction:column;gap:8px}
+  .panel .row input{width:100%}
+  .panel .row .btn{width:100%}
+  .edform .r input{font-size:13px}
+  .empty{padding:20px;font-size:13px}
+}
 </style>
 </head>
 <body>
