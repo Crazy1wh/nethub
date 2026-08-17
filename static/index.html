@@ -77,6 +77,8 @@ input[type=text]:focus{border-color:var(--accent)}
 .edform .r{display:flex;gap:6px}
 .edform .r input{flex:1;min-width:0;padding:5px 8px;font-size:12px}
 .edform .r button{padding:5px 10px;font-size:12px}
+#btnManage{display:none}
+#btnManage.active{border-color:var(--accent);color:#fff}
 @media(max-width:600px){
   .wrap{padding:12px 12px 40px}
   header{gap:8px;margin-bottom:4px}
@@ -85,6 +87,7 @@ input[type=text]:focus{border-color:var(--accent)}
   .seg{order:2}
   #btnScan{order:4}
   #btnAdd{order:5}
+  #btnManage{display:block;order:6}
   .seg-btn{padding:8px 11px;font-size:12px}
   .btn{padding:8px 11px;font-size:12px}
   .sub{font-size:11px;margin-bottom:12px}
@@ -95,9 +98,10 @@ input[type=text]:focus{border-color:var(--accent)}
   .info .nm{font-size:13px}
   .info .ur{font-size:10px}
   .dot{top:8px;right:8px;width:7px;height:7px}
-  /* 手机无 hover: 操作按钮常显, 独立一行 */
-  .acts{position:static;display:flex;width:100%;justify-content:flex-end;gap:4px;border-top:1px solid var(--border);padding-top:6px;margin-top:2px}
-  .acts button{font-size:12px;padding:3px 9px}
+  /* 手机默认隐藏操作按钮(卡片干净), 点「⚙管理」才显示 */
+  .acts{display:none}
+  body.manage .acts{display:flex;position:static;width:100%;justify-content:flex-end;gap:4px;border-top:1px solid var(--border);padding-top:6px;margin-top:2px}
+  body.manage .acts button{font-size:12px;padding:3px 9px}
   .group{margin-bottom:20px}
   .group h2{font-size:14px}
   .panel{padding:12px}
@@ -119,6 +123,7 @@ input[type=text]:focus{border-color:var(--accent)}
     </span>
     <button class="btn" id="btnScan">⟳ 重新扫描</button>
     <button class="btn primary" id="btnAdd">＋ 添加</button>
+    <button class="btn" id="btnManage" title="管理模式: 显示卡片操作按钮">⚙</button>
   </header>
   <div class="sub" id="sub"></div>
   <div id="statusbar"></div>
@@ -247,6 +252,10 @@ async function doScan(){
 
 $('#btnScan').onclick=doScan;
 $('#search').oninput=render;
+$('#btnManage').onclick=()=>{
+  document.body.classList.toggle('manage');
+  $('#btnManage').classList.toggle('active');
+};
 $('#segGroup').addEventListener('click',ev=>{
   const b=ev.target.closest('.seg-btn');if(!b)return;
   groupMode=b.dataset.mode;
