@@ -1,6 +1,11 @@
 services:
   nethub:
-    build: .
+    build:
+      context: .
+      args:
+        # 本机 Docker Hub 直连被墙 -> 用国内加速器; 公网/CI 用官方源(默认)
+        BASE_IMAGE: docker.1ms.run/library/python:3.11-slim
+        PIP_INDEX: -i https://pypi.tuna.tsinghua.edu.cn/simple
     container_name: nethub
     network_mode: host
     volumes:
