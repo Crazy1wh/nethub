@@ -29,8 +29,9 @@ os.makedirs(ICON_DIR, exist_ok=True)
 OWN_PORT = int(os.environ.get("OWN_PORT", "80"))
 SUBNET = os.environ.get("SCAN_SUBNET", "192.168.1.0/24")
 COMMON_PORTS = [int(x) for x in os.environ.get(
+    # 探活端口(找在线主机); 不在列表的端口由阶段2 全端口扫描兜底
     "SCAN_PORTS",
-    "80,443,3000,3001,4000,5000,66,8000,8010,8090,8092,8322,8080,8088,8081,9000,8888,9090,9443"
+    "80,443,22,5000,5001,66,3000,3001,3002,4000,5601,7000,7001,7443,8000,8010,8080,8081,8085,8088,8090,8092,8181,8322,8443,8800,8880,8888,9000,9001,9080,9090,9443,4848,5050,8091,8082,8282,10000"
 ).split(",")]
 FULL_SCAN = os.environ.get("SCAN_FULL_PORTS", "1") == "1"
 SCAN_INTERVAL_H = float(os.environ.get("SCAN_INTERVAL_HOURS", "6"))
@@ -73,6 +74,7 @@ def init_db():
             status_code INTEGER,
             title TEXT,
             host_ip TEXT DEFAULT '',
+            favorite INTEGER DEFAULT 0,
             last_seen TEXT,
             first_seen TEXT,
             updated_at TEXT
@@ -81,6 +83,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             started_at TEXT, finished_at TEXT,
             found INTEGER, total TEXT, detail TEXT
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY, value TEXT
         )""")
 
 
@@ -97,6 +102,35 @@ def migrate_db():
             c.execute("DELETE FROM sites WHERE source='auto'")
         if "favorite" not in cols:
             c.execute("ALTER TABLE sites ADD COLUMN favorite INTEGER DEFAULT 0")
+
+
+def get_settings():
+    """运行时设置: env 提供默认值, DB(前端可改)覆盖"""
+    s = {
+        "scan_workers": int(os.environ.get("SCAN_WORKERS", "600")),      # 端口扫描并发线程
+        "probe_workers": int(os.environ.get("PROBE_WORKERS", "16")),     # HTTP 探测并发
+        "connect_timeout": float(os.environ.get("CONNECT_TIMEOUT", "0.4")),  # 连接超时(秒)
+        "scan_interval_hours": float(os.environ.get("SCAN_INTERVAL_HOURS", "6")),  # 重扫频率(小时)
+        "full_scan": os.environ.get("SCAN_FULL_PORTS", "1") == "1",      # 是否对在线主机全端口扫描
+    }
+    try:
+        with db() as c:
+            rows = c.execute("SELECT key, value FROM settings").fetchall()
+    except Exception:
+        rows = []
+    for k, v in rows:
+        if k not in s or v == "":
+            continue
+        try:
+            if k == "full_scan":
+                s[k] = v == "1"
+            elif k in ("scan_workers", "probe_workers"):
+                s[k] = max(1, min(int(v), 5000))
+            elif k in ("connect_timeout", "scan_interval_hours"):
+                s[k] = max(0.05, min(float(v), 24.0 if k == "scan_interval_hours" else 30.0))
+        except (ValueError, TypeError):
+            continue
+    return s
 
 
 # ---------- 发现 ----------
@@ -251,12 +285,20 @@ def run_scan():
     started = dt.datetime.now()
     detail = []
     try:
+        st = get_settings()
         own = my_ip()
         net = ipaddress.ip_network(SUBNET, strict=False)
         hosts_common = [str(x) for x in net.hosts()][:512]
-        found = scan_ports(hosts_common, COMMON_PORTS)
-        if FULL_SCAN:
-            found |= full_port_scan({own, "127.0.0.1"})
+        # 阶段1: 探活——扫常见端口, 找在线主机(同时收录这些常见端口)
+        live_ports = scan_ports(hosts_common, COMMON_PORTS,
+                                timeout=st["connect_timeout"], workers=st["scan_workers"])
+        live_hosts = {ip for ip, _ in live_ports} | {own, "127.0.0.1"}
+        found = live_ports
+        # 阶段2: 对所有在线主机全端口扫描——覆盖不在列表里的端口(如 5001)
+        if st["full_scan"]:
+            found |= full_port_scan(live_hosts,
+                                    timeout=min(st["connect_timeout"], 0.2),
+                                    workers=st["scan_workers"])
         results = []
         found_sorted = sorted(found)
 
@@ -296,7 +338,7 @@ def run_scan():
                     }
             return None
 
-        with concurrent.futures.ThreadPoolExecutor(16) as ex:
+        with concurrent.futures.ThreadPoolExecutor(st["probe_workers"]) as ex:
             probed = [r for r in ex.map(probe_one, found_sorted) if r]
 
         # 同一端口同时发现 127.0.0.1 与本机 IP 时, 保留本机 IP(其他设备可达), 丢弃回环
@@ -336,7 +378,8 @@ def scanner_loop():
             run_scan()
         except Exception as e:
             print("scan error:", e)
-        time.sleep(SCAN_INTERVAL_H * 3600)
+        # 每次循环动态读取重扫频率(前端可改, 实时生效)
+        time.sleep(max(0.5, get_settings()["scan_interval_hours"] * 3600))
 
 
 # ---------- API ----------
@@ -427,6 +470,26 @@ def delete_site(sid: int):
     with db() as c:
         c.execute("DELETE FROM sites WHERE id=?", (sid,))
     return {"ok": True}
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    return get_settings()
+
+
+SETTING_KEYS = ("scan_workers", "probe_workers", "connect_timeout", "scan_interval_hours", "full_scan")
+
+
+@app.put("/api/settings")
+async def api_set_settings(req: Request):
+    body = await req.json()
+    with db() as c:
+        for k, v in body.items():
+            if k not in SETTING_KEYS:
+                continue
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (k, str(v)))
+    return get_settings()
 
 
 @app.post("/api/scan")

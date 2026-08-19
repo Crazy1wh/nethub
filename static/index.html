@@ -70,6 +70,9 @@ input[type=text]:focus{border-color:var(--accent)}
 .panel .row{display:flex;gap:8px;flex-wrap:wrap}
 .panel input{flex:1;min-width:140px}
 .panel .hint{font-size:11px;color:var(--gray);margin-top:8px}
+.set-field{display:flex;align-items:center;gap:8px;margin-bottom:10px;color:var(--dim);font-size:13px;flex-wrap:wrap}
+.set-field input{max-width:130px}
+.set-field input[type=checkbox]{transform:scale(1.3);margin-left:6px}
 .editing{border-color:var(--accent)}
 .editing .info{display:none}
 .edform{display:none;flex-direction:column;gap:6px;width:100%}
@@ -118,6 +121,7 @@ input[type=text]:focus{border-color:var(--accent)}
     </span>
     <button class="btn" id="btnScan">⟳ 重新扫描</button>
     <button class="btn primary" id="btnAdd">＋ 添加</button>
+    <button class="btn" id="btnSettings" title="扫描设置">⚙</button>
   </header>
   <div class="sub" id="sub"></div>
   <div id="statusbar"></div>
@@ -131,6 +135,19 @@ input[type=text]:focus{border-color:var(--accent)}
       <button class="btn" id="addCancel">取消</button>
     </div>
     <div class="hint">保存前会自动探测站点标题与状态</div>
+  </div>
+  <div class="panel" id="setPanel">
+    <h3>扫描设置</h3>
+    <div class="set-field"><label>端口扫描线程(越大越快, 越高 CPU):</label><input type="number" id="stWorkers" min="1" max="5000"></div>
+    <div class="set-field"><label>自动重扫频率(小时):</label><input type="number" id="stInterval" min="0.1" max="24" step="0.5"></div>
+    <div class="set-field"><label>连接超时(秒):</label><input type="number" id="stTimeout" min="0.1" max="30" step="0.1"></div>
+    <div class="set-field"><label>HTTP 探测并发:</label><input type="number" id="stProbe" min="1" max="200"></div>
+    <div class="set-field"><label>对在线主机全端口(1-65535)扫描:</label><input type="checkbox" id="stFull"></div>
+    <div class="row">
+      <button class="btn primary" id="setOk">保存</button>
+      <button class="btn" id="setCancel">取消</button>
+    </div>
+    <div class="hint">保存后下次扫描生效; 重扫频率实时生效</div>
   </div>
   <div id="content"></div>
 </div>
@@ -246,6 +263,30 @@ async function doScan(){
 
 $('#btnScan').onclick=doScan;
 $('#search').oninput=render;
+$('#btnSettings').onclick=async()=>{
+  $('#setPanel').classList.toggle('show');
+  if($('#setPanel').classList.contains('show')){
+    try{
+      const s=await api('/api/settings');
+      $('#stWorkers').value=s.scan_workers;
+      $('#stInterval').value=s.scan_interval_hours;
+      $('#stTimeout').value=s.connect_timeout;
+      $('#stProbe').value=s.probe_workers;
+      $('#stFull').checked=!!s.full_scan;
+    }catch(e){}
+  }
+};
+$('#setCancel').onclick=()=>$('#setPanel').classList.remove('show');
+$('#setOk').onclick=async()=>{
+  const w=+$('#stWorkers').value, i=+$('#stInterval').value, t=+$('#stTimeout').value, p=+$('#stProbe').value;
+  if(!w||w<1||w>5000){alert('扫描线程需在 1-5000');return}
+  if(!t||t<=0){alert('连接超时需大于 0');return}
+  try{
+    await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({scan_workers:w,scan_interval_hours:i,connect_timeout:t,probe_workers:p,full_scan:$('#stFull').checked?1:0})});
+    $('#setPanel').classList.remove('show');
+  }catch(e){alert(e.message)}
+};
 $('#segGroup').addEventListener('click',ev=>{
   const b=ev.target.closest('.seg-btn');if(!b)return;
   groupMode=b.dataset.mode;
